@@ -7,7 +7,9 @@ A lightweight Go package for authenticating JSON Web Tokens (JWTs) using a JSON 
 - Validates JWTs using a remote JWKS endpoint.
 - Extracts user identity claims from valid access tokens.
 - Automatic caching and periodic refreshing of the JWKS to improve performance.
+- Keeps serving the cached JWKS if a refresh fails.
 - Configurable request timeout and JWKS refresh interval.
+- Safe for concurrent use.
 
 ## Usage
 
@@ -18,38 +20,44 @@ This package defines an interface `IAuthenticator[T]` for type-safe identity ext
 ```go
 package auth
 
-import "net/http"
-
 type IAuthenticator[T any] interface {
-	GetIdentityFromHeader(httpHeaders http.Header, header string) (T, error)
-	GetIdentityFromAccessToken(token string) (T, error)
+	GetIdentity(token string) (T, error)
 }
 ```
 
-The generic type `T` represents your application's user identity structure.
+The generic type `T` represents your application's user identity structure. `GetIdentity` verifies the token's signature and registered claims (`exp`, `nbf`, `iat`), then decodes the payload into `T`.
 
 ### Implementation
 
-The `JwksAuthenticator` struct implements the `IAuthenticator` interface. It is initialized with the URI of a JWKS endpoint.
+The `JwksAuthenticator` struct implements the `IAuthenticator` interface. It is initialized with the URL of a JWKS endpoint and optional configuration options.
 
 ```go
-func NewJwksAuthenticator[T any](jwksUri string) IAuthenticator[T]
+func NewJwksAuthenticator[T any](jwksUrl string, opts ...func(*JwksAuthenticator[T])) *JwksAuthenticator[T]
 ```
 
 ### Example
 
 ```go
 // Define your user identity structure
-// type UserClaims struct {
-//     Sub string `json:"sub"`
-//     Name string `json:"name"`
-// }
+type UserClaims struct {
+	Sub  string `json:"sub"`
+	Name string `json:"name"`
+}
 
 // Create a new authenticator
-authenticator := auth.NewJwksAuthenticator[UserClaims]("https://your-oidc-provider/.well-known/jwks.json")
+authenticator := auth.NewJwksAuthenticator[UserClaims](
+	"https://your-oidc-provider/.well-known/jwks.json",
+	auth.WithJwksTimeout[UserClaims](5*time.Second),
+	auth.WithJwksRefreshInterval[UserClaims](1*time.Hour),
+)
 
-// Extract identity from an HTTP request
-identity, err := authenticator.GetIdentityFromHeader(r.Header, "Authorization")
+// Extract the bearer token from an HTTP request
+token, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+if !found {
+	// handle missing/invalid header (e.g., unauthorized)
+}
+
+identity, err := authenticator.GetIdentity(token)
 if err != nil {
 	// handle error (e.g., unauthorized)
 }
@@ -58,12 +66,15 @@ if err != nil {
 
 ## Configuration
 
-The `JwksAuthenticator` has the following default settings:
+| Option                        | Default    | Description                                                                 |
+| ----------------------------- | ---------- | --------------------------------------------------------------------------- |
+| `WithJwksTimeout[T](d)`       | 10 seconds | Timeout for fetching the JWKS.                                              |
+| `WithJwksRefreshInterval[T](d)` | 6 hours  | The JWKS is fetched on first use and refreshed after this interval.        |
 
-- **Request Timeout**: 10 seconds for fetching the JWKS.
-- **JWKS Refresh Interval**: 10 minutes (600 seconds). The JWKS is fetched on first use and then refreshed automatically after this interval.
+The type parameter must be given explicitly on the options (e.g. `auth.WithJwksTimeout[UserClaims](...)`), since Go cannot infer it from the arguments.
+
+If a refresh fails while a JWKS is already cached, the cached set continues to be used and the refresh is retried after about one minute.
 
 ## Dependencies
 
-- [github.com/lestrrat-go/jwx/v3](https://github.com/lestrrat-go/jwx/v3) for JWT and JWK handling. [^1][^2]
-
+- [github.com/lestrrat-go/jwx/v4](https://github.com/lestrrat-go/jwx) for JWT and JWK handling.
